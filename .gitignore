@@ -1,0 +1,25 @@
+# Assignment materials
+assignment/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Data
+data/
+datasets/
+
+# Model artifacts
+checkpoints/
+*.pth
+*.pt
+
+# Generated outputs
+results/
+reports/
+
+# IDE / OS
+.vscode/
+.DS_Store
