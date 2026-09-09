@@ -15,6 +15,14 @@ def test_imports():
     assert evaluation is not None
     assert runner is not None
 
+    # Verify pixel-level exports
+    from benchmark.evaluation import compute_pixel_metrics, PixelMetrics, resize_anomaly_map
+    from benchmark.threshold import calibrate_pixel_threshold
+    assert compute_pixel_metrics is not None
+    assert PixelMetrics is not None
+    assert resize_anomaly_map is not None
+    assert calibrate_pixel_threshold is not None
+
 
 def test_config_creation():
     """Test config dataclass creation and serialization."""

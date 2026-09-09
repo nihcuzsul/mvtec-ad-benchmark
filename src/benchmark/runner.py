@@ -13,8 +13,8 @@ import torch
 from .config import BenchmarkConfig
 from .dataset import MVTecADWrapper
 from .models import create_model_adapter
-from .threshold import calibrate_threshold
-from .evaluation import compute_image_metrics, ImageMetrics
+from .threshold import calibrate_threshold, calibrate_pixel_threshold
+from .evaluation import compute_image_metrics, compute_pixel_metrics, ImageMetrics, PixelMetrics
 
 
 def seed_everything(seed: int) -> None:
@@ -33,14 +33,16 @@ class BenchmarkResult:
     """Result of a single category+model benchmark run."""
     category: str
     model: str
-    metrics: ImageMetrics
+    image_metrics: ImageMetrics
+    pixel_metrics: PixelMetrics
     config: dict
 
     def to_dict(self) -> dict:
         return {
             "category": self.category,
             "model": self.model,
-            "metrics": self.metrics.to_dict(),
+            "image_metrics": self.image_metrics.to_dict(),
+            "pixel_metrics": self.pixel_metrics.to_dict(),
             "config": self.config,
         }
 
@@ -53,8 +55,8 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     1. Load dataset
     2. Create model adapter
     3. Fit model on training data
-    4. Calibrate threshold on validation data (normal only)
-    5. Evaluate on test data
+    4. Calibrate thresholds on validation data (normal only)
+    5. Evaluate on test data (image-level and pixel-level)
     6. Measure latency
     """
     print(f"\n{'='*60}")
@@ -80,18 +82,21 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     fit_time = time.time() - start_fit
     print(f"  Fit time: {fit_time:.2f}s")
 
-    # 4. Calibrate threshold on validation data (normal only)
-    print("Calibrating threshold on validation data...")
-    val_scores, _ = dataset.get_normal_val_scores(model)
-    threshold = calibrate_threshold(val_scores, config.threshold)
-    print(f"  Threshold ({config.threshold.strategy}): {threshold:.6f}")
+    # 4. Calibrate thresholds on validation data (normal only)
+    print("Calibrating thresholds on validation data...")
+    val_scores, val_anomaly_maps = dataset.get_normal_val_scores(model)
+    image_threshold = calibrate_threshold(val_scores, config.threshold)
+    pixel_threshold = calibrate_pixel_threshold(val_anomaly_maps, config.threshold)
+    print(f"  Image threshold ({config.threshold.strategy}): {image_threshold:.6f}")
+    print(f"  Pixel threshold ({config.threshold.strategy}): {pixel_threshold:.6f}")
     print(f"  Val score stats: mean={val_scores.mean():.4f}, std={val_scores.std():.4f}, "
           f"min={val_scores.min():.4f}, max={val_scores.max():.4f}")
 
     # 5. Evaluate on test data
     print("Evaluating on test data...")
-    test_images, test_labels, _, test_paths = dataset.get_test_data()
+    test_images, test_labels, test_masks, test_paths = dataset.get_test_data()
     print(f"  Test samples: {len(test_images)} (normal={(test_labels==0).sum()}, anomalous={(test_labels==1).sum()})")
+    print(f"  Test masks shape: {test_masks.shape}")
 
     test_scores = []
     test_maps = []
@@ -115,18 +120,26 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     )
     print(f"  Latency: {latency:.2f} ms/image")
 
-    # 7. Compute metrics
-    metrics = compute_image_metrics(test_scores, test_labels, threshold, latency)
-    print(f"\nResults:")
-    print(f"  AUROC:  {metrics.auroc:.4f}")
-    print(f"  AUPRC:  {metrics.auprc:.4f}")
-    print(f"  F1:     {metrics.f1:.4f} (threshold={metrics.threshold:.6f})")
-    print(f"  Latency: {metrics.latency_ms:.2f} ms/image")
+    # 7. Compute image-level metrics
+    image_metrics = compute_image_metrics(test_scores, test_labels, image_threshold, latency)
+    print(f"\nImage-Level Results:")
+    print(f"  AUROC:  {image_metrics.auroc:.4f}")
+    print(f"  AUPRC:  {image_metrics.auprc:.4f}")
+    print(f"  F1:     {image_metrics.f1:.4f} (threshold={image_metrics.threshold:.6f})")
+    print(f"  Latency: {image_metrics.latency_ms:.2f} ms/image")
+
+    # 8. Compute pixel-level metrics
+    pixel_metrics = compute_pixel_metrics(test_maps, test_masks, pixel_threshold)
+    print(f"\nPixel-Level Results:")
+    print(f"  AUROC:  {pixel_metrics.auroc:.4f}")
+    print(f"  AUPRC:  {pixel_metrics.auprc:.4f}")
+    print(f"  F1:     {pixel_metrics.f1:.4f} (threshold={pixel_metrics.threshold:.6f})")
 
     result = BenchmarkResult(
         category=config.dataset.category,
         model=config.model.name,
-        metrics=metrics,
+        image_metrics=image_metrics,
+        pixel_metrics=pixel_metrics,
         config=config.to_dict(),
     )
 
@@ -148,11 +161,15 @@ def save_results(result: BenchmarkResult, output_dir: Path) -> None:
     row = {
         "category": result.category,
         "model": result.model,
-        "image_auroc": result.metrics.auroc,
-        "image_auprc": result.metrics.auprc,
-        "image_f1": result.metrics.f1,
-        "threshold": result.metrics.threshold,
-        "latency_ms": result.metrics.latency_ms,
+        "image_auroc": result.image_metrics.auroc,
+        "image_auprc": result.image_metrics.auprc,
+        "image_f1": result.image_metrics.f1,
+        "image_threshold": result.image_metrics.threshold,
+        "pixel_auroc": result.pixel_metrics.auroc,
+        "pixel_auprc": result.pixel_metrics.auprc,
+        "pixel_f1": result.pixel_metrics.f1,
+        "pixel_threshold": result.pixel_metrics.threshold,
+        "latency_ms": result.image_metrics.latency_ms,
     }
 
     file_exists = csv_path.exists()

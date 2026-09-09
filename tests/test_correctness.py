@@ -10,8 +10,19 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from benchmark.evaluation import compute_image_metrics
-from benchmark.threshold import apply_threshold, calibrate_threshold, ThresholdConfig
+from benchmark.evaluation import (
+    compute_image_metrics,
+    compute_pixel_metrics,
+    resize_anomaly_map,
+    ImageMetrics,
+    PixelMetrics,
+)
+from benchmark.threshold import (
+    apply_threshold,
+    calibrate_threshold,
+    calibrate_pixel_threshold,
+    ThresholdConfig,
+)
 
 
 class TestThresholdDirection:
@@ -177,7 +188,7 @@ class TestValScoreFiltering:
         model = create_model_adapter(model_config, "cpu")
         model.fit(dataset.train_loader)
 
-        val_scores, _ = dataset.get_normal_val_scores(model)
+        val_scores, val_maps = dataset.get_normal_val_scores(model)
 
         # The SYNTHETIC val split has ~21 normal + ~20 anomalous images
         # After filtering, we should have only normal images
@@ -193,6 +204,146 @@ class TestValScoreFiltering:
             f"Max val score {val_scores.max().item():.1f} is suspiciously high. "
             "Anomalous images may not be filtered out."
         )
+        # Verify anomaly maps are also returned
+        assert val_maps.numel() > 0, "Should have val anomaly maps"
+        assert val_maps.shape[0] == val_scores.shape[0], (
+            f"Val maps count {val_maps.shape[0]} != val scores count {val_scores.shape[0]}"
+        )
+
+
+class TestResizeAnomalyMap:
+    """Tests for anomaly map resizing."""
+
+    def test_same_size_no_change(self):
+        """When sizes match, map should be unchanged."""
+        map_2d = torch.randn(256, 256)
+        resized = resize_anomaly_map(map_2d, 256, 256)
+        assert resized.shape == (256, 256)
+        assert torch.allclose(resized, map_2d)
+
+    def test_2d_resize(self):
+        """Test resizing a 2D anomaly map."""
+        map_2d = torch.randn(64, 64)
+        resized = resize_anomaly_map(map_2d, 128, 128)
+        assert resized.shape == (128, 128)
+
+    def test_3d_resize(self):
+        """Test resizing a batch of anomaly maps."""
+        map_3d = torch.randn(4, 64, 64)
+        resized = resize_anomaly_map(map_3d, 128, 128)
+        assert resized.shape == (4, 128, 128)
+
+    def test_upscale_interpolation(self):
+        """Test that upsampling preserves general structure."""
+        # Create a simple map with a bright spot in the center
+        map_2d = torch.zeros(10, 10)
+        map_2d[4:6, 4:6] = 1.0
+        resized = resize_anomaly_map(map_2d, 20, 20)
+        assert resized.shape == (20, 20)
+        # Center should still be bright
+        assert resized[9:11, 9:11].mean() > resized[0:2, 0:2].mean()
+
+
+class TestPixelThresholdCalibration:
+    """Tests for pixel-level threshold calibration."""
+
+    def test_percentile_pixel_threshold(self):
+        """Test percentile-based pixel threshold."""
+        # Create a map with known pixel values
+        maps = torch.full((5, 10, 10), 10.0)  # All pixels = 10
+        config = ThresholdConfig(strategy="percentile", percentile=99.0)
+        threshold = calibrate_pixel_threshold(maps, config)
+        assert threshold == 10.0
+
+    def test_max_pixel_threshold(self):
+        """Test max-based pixel threshold."""
+        maps = torch.zeros(2, 10, 10)
+        maps[0, 5, 5] = 100.0  # One pixel is 100
+        config = ThresholdConfig(strategy="max")
+        threshold = calibrate_pixel_threshold(maps, config)
+        assert threshold == 100.0
+
+    def test_empty_maps_raises(self):
+        """Empty maps should raise ValueError."""
+        config = ThresholdConfig(strategy="percentile")
+        with pytest.raises(ValueError):
+            calibrate_pixel_threshold(torch.empty(0, 10, 10), config)
+
+
+class TestPixelMetrics:
+    """Tests for pixel-level metrics computation."""
+
+    def test_perfect_pixel_auroc(self):
+        """Perfect anomaly map separation should yield AUROC=1.0."""
+        # Anomaly maps: anomalous images have high scores, normal have low
+        anomaly_maps = torch.tensor([
+            [[0.1, 0.1], [0.1, 0.1]],  # Normal image, low scores
+            [[0.9, 0.9], [0.9, 0.9]],  # Anomalous image, high scores
+        ])
+        gt_masks = torch.tensor([
+            [[False, False], [False, False]],  # Normal image, all zeros
+            [[True, True], [True, True]],       # Anomalous image, all ones
+        ])
+        metrics = compute_pixel_metrics(anomaly_maps, gt_masks, 0.5)
+        assert metrics.auroc == 1.0
+        assert metrics.auprc == 1.0
+
+    def test_pixel_f1_perfect(self):
+        """Perfect pixel predictions should yield F1=1.0."""
+        anomaly_maps = torch.tensor([
+            [[0.1, 0.9], [0.1, 0.9]],
+        ])
+        gt_masks = torch.tensor([
+            [[False, True], [False, True]],
+        ])
+        metrics = compute_pixel_metrics(anomaly_maps, gt_masks, 0.5)
+        assert metrics.f1 == pytest.approx(1.0)
+
+    def test_pixel_f1_zero(self):
+        """All wrong pixel predictions should yield F1=0.0."""
+        anomaly_maps = torch.tensor([
+            [[0.9, 0.9], [0.9, 0.9]],  # All high scores
+        ])
+        gt_masks = torch.tensor([
+            [[False, False], [False, False]],  # But all normal
+        ])
+        metrics = compute_pixel_metrics(anomaly_maps, gt_masks, 0.5)
+        assert metrics.f1 == 0.0
+
+    def test_resize_in_pixel_metrics(self):
+        """Pixel metrics should handle different anomaly map/mask sizes."""
+        # Anomaly map is 4x4, mask is 8x8
+        anomaly_maps = torch.zeros(1, 4, 4)
+        anomaly_maps[0, 1:3, 1:3] = 1.0  # Bright center
+        gt_masks = torch.zeros(1, 8, 8).bool()
+        gt_masks[0, 2:6, 2:6] = True  # Larger mask region
+        metrics = compute_pixel_metrics(anomaly_maps, gt_masks, 0.5)
+        assert not np.isnan(metrics.auroc)
+        assert 0.0 <= metrics.f1 <= 1.0
+
+    def test_pixel_metrics_single_class(self):
+        """Pixel metrics with only normal pixels."""
+        anomaly_maps = torch.tensor([[[0.1, 0.2], [0.3, 0.4]]])
+        gt_masks = torch.tensor([[[False, False], [False, False]]]).bool()
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            metrics = compute_pixel_metrics(anomaly_maps, gt_masks, 0.5)
+            assert np.isnan(metrics.auroc)  # Only one class
+
+    def test_pixel_metrics_matches_manual(self):
+        """Pixel F1 should match manual computation."""
+        anomaly_maps = torch.tensor([
+            [[0.3, 0.7], [0.2, 0.8]],
+        ])
+        gt_masks = torch.tensor([
+            [[False, True], [False, True]],
+        ])
+        threshold = 0.5
+        metrics = compute_pixel_metrics(anomaly_maps, gt_masks, threshold)
+
+        # Manual: pred=[0,1,0,1], label=[0,1,0,1] -> TP=2, FP=0, FN=0
+        assert metrics.f1 == pytest.approx(1.0)
+        assert metrics.threshold == threshold
 
 
 if __name__ == "__main__":

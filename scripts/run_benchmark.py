@@ -137,11 +137,12 @@ def main() -> int:
     print("\n" + "="*80)
     print("BENCHMARK SUMMARY")
     print("="*80)
-    print(f"{'Category':<15} {'Model':<10} {'AUROC':>8} {'AUPRC':>8} {'F1':>8} {'Latency(ms)':>12}")
+    print(f"{'Category':<12} {'Model':<8} {'ImgAUROC':>9} {'ImgAUPRC':>9} {'ImgF1':>7} {'PixAUROC':>9} {'PixAUPRC':>9} {'PixF1':>7} {'Lat(ms)':>8}")
     print("-"*80)
     for r in all_results:
-        print(f"{r.category:<15} {r.model:<10} {r.metrics.auroc:>8.4f} {r.metrics.auprc:>8.4f} "
-              f"{r.metrics.f1:>8.4f} {r.metrics.latency_ms:>12.2f}")
+        print(f"{r.category:<12} {r.model:<8} {r.image_metrics.auroc:>9.4f} {r.image_metrics.auprc:>9.4f} "
+              f"{r.image_metrics.f1:>7.4f} {r.pixel_metrics.auroc:>9.4f} {r.pixel_metrics.auprc:>9.4f} "
+              f"{r.pixel_metrics.f1:>7.4f} {r.image_metrics.latency_ms:>8.2f}")
     print("="*80)
 
     return 0

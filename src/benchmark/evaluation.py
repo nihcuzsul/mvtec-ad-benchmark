@@ -1,4 +1,4 @@
-"""Image-level evaluation metrics."""
+"""Image-level and pixel-level evaluation metrics."""
 
 import warnings
 from dataclasses import dataclass
@@ -24,9 +24,131 @@ class ImageMetrics:
             "image_auroc": self.auroc,
             "image_auprc": self.auprc,
             "image_f1": self.f1,
-            "threshold": self.threshold,
+            "image_threshold": self.threshold,
             "latency_ms": self.latency_ms,
         }
+
+
+@dataclass
+class PixelMetrics:
+    """Container for pixel-level metrics."""
+    auroc: float
+    auprc: float
+    f1: float
+    threshold: float
+
+    def to_dict(self) -> dict:
+        return {
+            "pixel_auroc": self.auroc,
+            "pixel_auprc": self.auprc,
+            "pixel_f1": self.f1,
+            "pixel_threshold": self.threshold,
+        }
+
+
+def resize_anomaly_map(
+    anomaly_map: torch.Tensor,
+    target_h: int,
+    target_w: int,
+) -> torch.Tensor:
+    """Resize an anomaly map to match target spatial dimensions.
+
+    Args:
+        anomaly_map: (H, W) or (1, H, W) or (B, H, W) tensor
+        target_h: target height
+        target_w: target width
+
+    Returns:
+        Resized tensor with same number of dimensions
+    """
+    if anomaly_map.ndim == 2:
+        map_tensor = anomaly_map.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        resized = torch.nn.functional.interpolate(
+            map_tensor, size=(target_h, target_w), mode="bilinear", align_corners=False
+        )
+        return resized.squeeze(0).squeeze(0)  # (target_h, target_w)
+    elif anomaly_map.ndim == 3:
+        map_tensor = anomaly_map.unsqueeze(1)  # (B, 1, H, W)
+        resized = torch.nn.functional.interpolate(
+            map_tensor, size=(target_h, target_w), mode="bilinear", align_corners=False
+        )
+        return resized.squeeze(1)  # (B, target_h, target_w)
+    else:
+        raise ValueError(f"Unexpected anomaly_map dimensions: {anomaly_map.ndim}")
+
+
+def compute_pixel_metrics(
+    anomaly_maps: torch.Tensor,
+    gt_masks: torch.Tensor,
+    threshold: float,
+) -> PixelMetrics:
+    """
+    Compute pixel-level metrics.
+
+    Args:
+        anomaly_maps: Predicted anomaly maps (N, H_pred, W_pred)
+        gt_masks: Ground truth masks (N, H_gt, W_gt), bool or float
+        threshold: Pixel-level decision threshold
+
+    Returns:
+        PixelMetrics with AUROC, AUPRC, F1, threshold
+    """
+    maps_np = anomaly_maps.cpu().numpy()
+    masks_np = gt_masks.cpu().numpy().astype(bool)
+
+    # Resize anomaly maps to match GT mask dimensions
+    n_images, h_gt, w_gt = masks_np.shape
+    resized_maps = []
+    for i in range(n_images):
+        h_pred, w_pred = maps_np[i].shape
+        if h_pred != h_gt or w_pred != w_gt:
+            resized = resize_anomaly_map(
+                torch.from_numpy(maps_np[i]), h_gt, w_gt
+            ).numpy()
+        else:
+            resized = maps_np[i]
+        resized_maps.append(resized)
+
+    resized_maps = np.stack(resized_maps)  # (N, H_gt, W_gt)
+
+    # Flatten to 1D arrays for sklearn
+    pixel_scores = resized_maps.ravel()
+    pixel_labels = masks_np.ravel().astype(int)
+
+    # AUROC (threshold-independent)
+    try:
+        auroc = float(roc_auc_score(pixel_labels, pixel_scores))
+    except ValueError:
+        auroc = float("nan")
+        warnings.warn(
+            "Pixel AUROC is undefined: only one class present in pixel labels.",
+            stacklevel=2,
+        )
+    if np.isnan(auroc):
+        warnings.warn("Pixel AUROC is NaN.", stacklevel=2)
+
+    # AUPRC (threshold-independent)
+    try:
+        auprc = float(average_precision_score(pixel_labels, pixel_scores))
+    except ValueError:
+        auprc = 0.0
+
+    # F1 at calibrated pixel threshold
+    preds = (pixel_scores > threshold).astype(int)
+    tp = int(((preds == 1) & (pixel_labels == 1)).sum())
+    fp = int(((preds == 1) & (pixel_labels == 0)).sum())
+    fn = int(((preds == 0) & (pixel_labels == 1)).sum())
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return PixelMetrics(
+        auroc=auroc,
+        auprc=auprc,
+        f1=f1,
+        threshold=threshold,
+    )
 
 
 def compute_image_metrics(
