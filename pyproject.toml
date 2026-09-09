@@ -1,0 +1,36 @@
+[project]
+name = "benchmark-pipeline"
+version = "0.1.0"
+description = "Automated benchmark pipeline for MVTec AD anomaly detection"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch>=2.0",
+    "anomalib>=2.6.0",
+    "lightning>=2.0",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "pyyaml",
+    "tqdm",
+]
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+license = {text = "MIT"}
+
+[project.scripts]
+benchmark = "scripts.run_benchmark:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
