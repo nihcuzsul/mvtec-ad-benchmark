@@ -398,6 +398,63 @@ class TestDeviceResolution:
         assert config.device == resolved
 
 
+class TestPatchCoreAdapter:
+    """Tests for PatchCore model adapter."""
+
+    def test_patchcore_creation(self):
+        """PatchCore adapter should be created with correct config."""
+        from benchmark.models import create_model_adapter, ModelConfig
+        config = ModelConfig(
+            name="patchcore",
+            backbone="wide_resnet50_2",
+            layers=("layer2", "layer3"),
+        )
+        adapter = create_model_adapter(config, "cpu")
+        assert hasattr(adapter, "fit")
+        assert hasattr(adapter, "predict")
+        assert hasattr(adapter, "get_latency")
+        assert adapter.device == torch.device("cpu")
+
+    def test_patchcore_predict_shapes(self):
+        """PatchCore predict should return correct shapes."""
+        from benchmark.models import create_model_adapter, ModelConfig
+        from benchmark.config import DatasetConfig
+        from benchmark.dataset import MVTecADWrapper
+
+        ds_config = DatasetConfig(root="datasets/MVTecAD", category="bottle")
+        dataset = MVTecADWrapper(ds_config)
+        dataset.prepare_data()
+        dataset.setup("fit")
+
+        config = ModelConfig(name="patchcore")
+        adapter = create_model_adapter(config, "cpu")
+        adapter.fit(dataset.train_loader)
+
+        test_images, _, _, _ = dataset.get_test_data()
+        anomaly_map, anomaly_score = adapter.predict(test_images[:2])
+
+        # Check shapes
+        assert anomaly_map.shape[0] == 2  # batch size
+        assert anomaly_score.shape[0] == 2  # batch size
+        assert anomaly_map.ndim == 3  # (B, H, W)
+        assert anomaly_score.ndim == 1  # (B,)
+
+    def test_patchcore_factory_recognized(self):
+        """Factory should recognize patchcore model name."""
+        from benchmark.models import create_model_adapter, ModelConfig
+        config = ModelConfig(name="patchcore")
+        adapter = create_model_adapter(config, "cpu")
+        assert type(adapter).__name__ == "PatchCoreAdapter"
+
+    def test_patchcore_default_config(self):
+        """PatchCore should have correct default parameters."""
+        from benchmark.config import ModelConfig
+        config = ModelConfig(name="patchcore")
+        assert config.backbone == "resnet18"  # Default from dataclass
+        assert config.coreset_sampling_ratio == 0.1
+        assert config.num_neighbors == 9
+
+
 class TestGPULatencyMeasurement:
     """Tests for GPU latency measurement."""
 

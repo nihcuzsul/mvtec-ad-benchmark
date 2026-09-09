@@ -43,6 +43,8 @@ class ModelConfig:
     layers: tuple[str, ...] = ("layer1", "layer2", "layer3")
     pre_trained: bool = True
     n_features: int | None = None
+    coreset_sampling_ratio: float = 0.1
+    num_neighbors: int = 9
 
 
 @dataclass

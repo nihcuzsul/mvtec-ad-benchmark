@@ -89,6 +89,30 @@ def parse_args() -> argparse.Namespace:
         default=100,
         help="Number of runs for latency measurement",
     )
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default=None,
+        help="Model backbone (default: resnet18 for padim, wide_resnet50_2 for patchcore)",
+    )
+    parser.add_argument(
+        "--layers",
+        nargs="+",
+        default=None,
+        help="Model layers (default: layer1 layer2 layer3 for padim, layer2 layer3 for patchcore)",
+    )
+    parser.add_argument(
+        "--coreset-sampling-ratio",
+        type=float,
+        default=0.1,
+        help="Coreset sampling ratio for PatchCore",
+    )
+    parser.add_argument(
+        "--num-neighbors",
+        type=int,
+        default=9,
+        help="Number of neighbors for PatchCore",
+    )
     return parser.parse_args()
 
 
@@ -96,6 +120,14 @@ def main() -> int:
     args = parse_args()
 
     # Build configuration
+    # Set model-specific defaults
+    if args.models[0] == "patchcore":
+        backbone = args.backbone if args.backbone else "wide_resnet50_2"
+        layers = args.layers if args.layers else ("layer2", "layer3")
+    else:
+        backbone = args.backbone if args.backbone else "resnet18"
+        layers = tuple(args.layers) if args.layers else ("layer1", "layer2", "layer3")
+
     config = BenchmarkConfig(
         dataset=DatasetConfig(
             root=args.data_root,
@@ -105,7 +137,13 @@ def main() -> int:
             val_split=args.val_split,
             seed=args.seed,
         ),
-        model=ModelConfig(name=args.models[0]),
+        model=ModelConfig(
+            name=args.models[0],
+            backbone=backbone,
+            layers=layers,
+            coreset_sampling_ratio=args.coreset_sampling_ratio,
+            num_neighbors=args.num_neighbors,
+        ),
         threshold=ThresholdConfig(
             strategy=args.threshold_strategy,
             percentile=args.threshold_percentile,
