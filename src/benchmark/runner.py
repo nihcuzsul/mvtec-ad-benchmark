@@ -10,7 +10,7 @@ import time
 import numpy as np
 import torch
 
-from .config import BenchmarkConfig
+from .config import BenchmarkConfig, resolve_device
 from .dataset import MVTecADWrapper
 from .models import create_model_adapter
 from .threshold import calibrate_threshold, calibrate_pixel_threshold
@@ -36,15 +36,19 @@ class BenchmarkResult:
     image_metrics: ImageMetrics
     pixel_metrics: PixelMetrics
     config: dict
+    peak_gpu_memory_mb: float = 0.0
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "category": self.category,
             "model": self.model,
             "image_metrics": self.image_metrics.to_dict(),
             "pixel_metrics": self.pixel_metrics.to_dict(),
             "config": self.config,
         }
+        if self.peak_gpu_memory_mb > 0:
+            result["peak_gpu_memory_mb"] = self.peak_gpu_memory_mb
+        return result
 
 
 def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
@@ -66,6 +70,10 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     # 0. Seed everything for reproducibility
     seed_everything(config.dataset.seed)
 
+    # 0b. Resolve device
+    device = config.resolve_device()
+    print(f"  Device: {device}")
+
     # 1. Setup dataset
     print("Loading dataset...")
     dataset = MVTecADWrapper(config.dataset)
@@ -73,7 +81,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     # 2. Create model
     print("Creating model...")
-    model = create_model_adapter(config.model, config.device)
+    model = create_model_adapter(config.model, device)
 
     # 3. Fit model on training data
     print("Fitting model on training data...")
@@ -113,15 +121,19 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     # 6. Measure latency
     print("Measuring latency...")
-    latency = model.get_latency(
+    latency_result = model.get_latency(
         test_images[:1],
         n_warmup=config.evaluation.latency_warmup,
         n_runs=config.evaluation.latency_runs,
     )
-    print(f"  Latency: {latency:.2f} ms/image")
+    latency_ms = latency_result["latency_ms"]
+    peak_gpu_mb = latency_result["peak_gpu_memory_mb"]
+    print(f"  Latency: {latency_ms:.2f} ms/image")
+    if peak_gpu_mb > 0:
+        print(f"  Peak GPU memory: {peak_gpu_mb:.1f} MB")
 
     # 7. Compute image-level metrics
-    image_metrics = compute_image_metrics(test_scores, test_labels, image_threshold, latency)
+    image_metrics = compute_image_metrics(test_scores, test_labels, image_threshold, latency_ms)
     print(f"\nImage-Level Results:")
     print(f"  AUROC:  {image_metrics.auroc:.4f}")
     print(f"  AUPRC:  {image_metrics.auprc:.4f}")
@@ -141,6 +153,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         image_metrics=image_metrics,
         pixel_metrics=pixel_metrics,
         config=config.to_dict(),
+        peak_gpu_memory_mb=peak_gpu_mb,
     )
 
     return result
@@ -170,6 +183,7 @@ def save_results(result: BenchmarkResult, output_dir: Path) -> None:
         "pixel_f1": result.pixel_metrics.f1,
         "pixel_threshold": result.pixel_metrics.threshold,
         "latency_ms": result.image_metrics.latency_ms,
+        "peak_gpu_memory_mb": result.peak_gpu_memory_mb,
     }
 
     file_exists = csv_path.exists()

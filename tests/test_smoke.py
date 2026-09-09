@@ -23,6 +23,10 @@ def test_imports():
     assert resize_anomaly_map is not None
     assert calibrate_pixel_threshold is not None
 
+    # Verify device exports
+    from benchmark.config import resolve_device
+    assert resolve_device is not None
+
 
 def test_config_creation():
     """Test config dataclass creation and serialization."""

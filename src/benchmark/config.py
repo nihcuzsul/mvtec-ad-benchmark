@@ -4,6 +4,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import torch
+
+
+def resolve_device(device: str) -> str:
+    """Resolve device string to actual device.
+
+    Args:
+        device: One of "auto", "cpu", "cuda"
+
+    Returns:
+        Resolved device string ("cpu" or "cuda:0")
+    """
+    if device == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and torch.cuda.is_available():
+        return "cuda:0"
+    return device
+
 
 @dataclass
 class DatasetConfig:
@@ -51,7 +69,12 @@ class BenchmarkConfig:
     threshold: ThresholdConfig = field(default_factory=ThresholdConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
     output_dir: Path = Path("./results")
-    device: str = "cpu"
+    device: str = "auto"
+
+    def resolve_device(self) -> str:
+        """Resolve device string to actual device and update config."""
+        self.device = resolve_device(self.device)
+        return self.device
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""

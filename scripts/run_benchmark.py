@@ -49,9 +49,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--device",
-        default="cpu",
-        choices=["cpu", "cuda"],
-        help="Device to run on",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device to run on (auto uses CUDA if available)",
     )
     parser.add_argument(
         "--val-split",

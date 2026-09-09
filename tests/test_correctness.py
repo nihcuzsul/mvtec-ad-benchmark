@@ -346,5 +346,86 @@ class TestPixelMetrics:
         assert metrics.threshold == threshold
 
 
+class TestDeviceResolution:
+    """Tests for device resolution logic."""
+
+    def test_auto_cpu_fallback(self):
+        """Auto should return cpu when cuda unavailable."""
+        from benchmark.config import resolve_device
+        result = resolve_device("auto")
+        assert result in ("cpu", "cuda:0")
+
+    def test_explicit_cpu(self):
+        """Explicit cpu should always return cpu."""
+        from benchmark.config import resolve_device
+        assert resolve_device("cpu") == "cpu"
+
+    def test_explicit_cuda(self):
+        """Explicit cuda should return cuda:0 when available, cpu otherwise."""
+        from benchmark.config import resolve_device
+        import torch
+        result = resolve_device("cuda")
+        if torch.cuda.is_available():
+            assert result == "cuda:0"
+        else:
+            assert result == "cpu"
+
+    def test_auto_uses_cuda_when_available(self):
+        """Auto should use cuda when available."""
+        from benchmark.config import resolve_device
+        import torch
+        result = resolve_device("auto")
+        if torch.cuda.is_available():
+            assert result == "cuda:0"
+        else:
+            assert result == "cpu"
+
+    def test_model_device_matches_config(self):
+        """Model adapter should be on the correct device."""
+        from benchmark.config import resolve_device
+        from benchmark.models import create_model_adapter, ModelConfig
+        device = resolve_device("auto")
+        config = ModelConfig(name="padim")
+        adapter = create_model_adapter(config, device)
+        assert adapter.device == torch.device(device)
+
+    def test_config_resolve_device_updates_config(self):
+        """BenchmarkConfig.resolve_device should update config.device."""
+        from benchmark.config import BenchmarkConfig
+        config = BenchmarkConfig(device="auto")
+        resolved = config.resolve_device()
+        assert resolved in ("cpu", "cuda:0")
+        assert config.device == resolved
+
+
+class TestGPULatencyMeasurement:
+    """Tests for GPU latency measurement."""
+
+    def test_latency_returns_dict(self):
+        """get_latency should return dict with latency_ms and peak_gpu_memory_mb."""
+        from benchmark.models import create_model_adapter, ModelConfig
+        from benchmark.config import DatasetConfig
+        from benchmark.dataset import MVTecADWrapper
+
+        # Use real dataset to create proper Batch objects for fitting
+        ds_config = DatasetConfig(root="datasets/MVTecAD", category="bottle")
+        dataset = MVTecADWrapper(ds_config)
+        dataset.prepare_data()
+        dataset.setup("fit")
+
+        config = ModelConfig(name="padim")
+        adapter = create_model_adapter(config, "cpu")
+        adapter.fit(dataset.train_loader)
+
+        # Test latency measurement
+        test_images, _, _, _ = dataset.get_test_data()
+        result = adapter.get_latency(test_images[:1], n_warmup=1, n_runs=2)
+        assert isinstance(result, dict)
+        assert "latency_ms" in result
+        assert "peak_gpu_memory_mb" in result
+        assert result["latency_ms"] > 0
+        assert result["peak_gpu_memory_mb"] >= 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

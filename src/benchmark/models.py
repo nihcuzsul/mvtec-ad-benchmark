@@ -32,8 +32,12 @@ class ModelAdapter(Protocol):
         """
         ...
 
-    def get_latency(self, images: torch.Tensor, n_warmup: int = 10, n_runs: int = 100) -> float:
-        """Measure inference latency in ms/image."""
+    def get_latency(self, images: torch.Tensor, n_warmup: int = 10, n_runs: int = 100) -> dict:
+        """Measure inference latency in ms/image and peak GPU memory.
+
+        Returns:
+            Dict with "latency_ms" and "peak_gpu_memory_mb" keys.
+        """
         ...
 
     @property
@@ -61,10 +65,16 @@ class PaDiMAdapter:
         self._fitted = False
 
     def fit(self, train_loader) -> None:
-        """Fit PaDiM on normal training data (extract features and compute stats)."""
+        """Fit PaDiM on normal training data (extract features and compute stats).
+
+        The entire fitting process runs on CPU because torch.linalg.inv with
+        MAGMA can fail on some CUDA configurations (e.g., NVIDIA T1200).
+        After fitting, the model is moved to the configured device for inference.
+        """
         self.model.train()
         from anomalib.engine import Engine
 
+        # Fit on CPU to avoid CUDA MAGMA errors in covariance inversion
         engine = Engine(
             max_epochs=1,
             accelerator="cpu",
@@ -75,8 +85,13 @@ class PaDiMAdapter:
             train_dataloaders=train_loader,
             val_dataloaders=None,
         )
+
         self._fitted = True
         self.model.eval()
+
+        # Move to target device for inference
+        if self.device.type == "cuda":
+            self.model.to(self.device)
 
     def predict(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict anomaly map and score."""
@@ -101,13 +116,22 @@ class PaDiMAdapter:
 
         return anomaly_map, anomaly_score
 
-    def get_latency(self, images: torch.Tensor, n_warmup: int = 10, n_runs: int = 100) -> float:
-        """Measure inference latency in ms/image."""
+    def get_latency(self, images: torch.Tensor, n_warmup: int = 10, n_runs: int = 100) -> dict:
+        """Measure inference latency and peak GPU memory.
+
+        Returns:
+            Dict with "latency_ms" (mean ms/image) and "peak_gpu_memory_mb" (0 if CPU).
+        """
         if not self._fitted:
             raise RuntimeError("Model must be fitted before latency measurement.")
 
         images = images.to(self.device)
         self.model.eval()
+
+        # Reset peak memory stats
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
+            torch.cuda.synchronize()
 
         # Warmup
         with torch.no_grad():
@@ -115,17 +139,26 @@ class PaDiMAdapter:
                 _ = self.model(images[:1])
 
         # Timed runs
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
         import time
-        torch.cuda.synchronize() if self.device.type == "cuda" else None
         start = time.perf_counter()
         with torch.no_grad():
             for _ in range(n_runs):
                 _ = self.model(images[:1])
-        torch.cuda.synchronize() if self.device.type == "cuda" else None
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
         end = time.perf_counter()
 
         total_time_ms = (end - start) * 1000
-        return total_time_ms / n_runs
+        latency_ms = total_time_ms / n_runs
+
+        # Peak GPU memory
+        peak_gpu_mb = 0.0
+        if self.device.type == "cuda":
+            peak_gpu_mb = torch.cuda.max_memory_allocated(self.device) / (1024 * 1024)
+
+        return {"latency_ms": latency_ms, "peak_gpu_memory_mb": peak_gpu_mb}
 
 
 def create_model_adapter(config: ModelConfig, device: str = "cpu") -> ModelAdapter:
