@@ -18,6 +18,8 @@ class ImageMetrics:
     f1: float
     threshold: float
     latency_ms: float
+    f1_max: float = 0.0
+    f1_max_threshold: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -26,6 +28,8 @@ class ImageMetrics:
             "image_f1": self.f1,
             "image_threshold": self.threshold,
             "latency_ms": self.latency_ms,
+            "image_f1_max": self.f1_max,
+            "image_f1_max_threshold": self.f1_max_threshold,
         }
 
 
@@ -36,6 +40,9 @@ class PixelMetrics:
     auprc: float
     f1: float
     threshold: float
+    f1_max: float = 0.0
+    f1_max_threshold: float = 0.0
+    aupro: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +50,9 @@ class PixelMetrics:
             "pixel_auprc": self.auprc,
             "pixel_f1": self.f1,
             "pixel_threshold": self.threshold,
+            "pixel_f1_max": self.f1_max,
+            "pixel_f1_max_threshold": self.f1_max_threshold,
+            "pixel_aupro": self.aupro,
         }
 
 
@@ -149,6 +159,58 @@ def compute_pixel_metrics(
         f1=f1,
         threshold=threshold,
     )
+
+
+def compute_aupro(
+    anomaly_maps: torch.Tensor,
+    gt_masks: torch.Tensor,
+    fpr_limit: float = 0.3,
+) -> float:
+    """Compute AUPRO (Area Under Per-Region Overlap) using Anomalib's implementation.
+
+    Uses connected component analysis on GT masks and computes per-region ROC
+    curves, averaged and integrated up to fpr_limit.
+
+    Args:
+        anomaly_maps: Predicted anomaly maps (N, H_pred, W_pred)
+        gt_masks: Ground truth masks (N, H_gt, W_gt), bool or float
+        fpr_limit: FPR limit for AUPRO integration (default: 0.3 per MVTec protocol)
+
+    Returns:
+        AUPRO score (float)
+    """
+    from .evaluation import resize_anomaly_map
+    from anomalib.metrics.aupro import _AUPRO
+
+    maps_np = anomaly_maps.cpu().numpy()
+    masks_np = gt_masks.cpu().numpy().astype(bool)
+
+    # Resize anomaly maps to match GT mask dimensions
+    n_images, h_gt, w_gt = masks_np.shape
+    resized_maps = []
+    for i in range(n_images):
+        h_pred, w_pred = maps_np[i].shape
+        if h_pred != h_gt or w_pred != w_gt:
+            resized = resize_anomaly_map(
+                torch.from_numpy(maps_np[i]), h_gt, w_gt
+            ).numpy()
+        else:
+            resized = maps_np[i]
+        resized_maps.append(resized)
+
+    resized_maps = np.stack(resized_maps)
+
+    # Convert to tensors for Anomalib's _AUPRO
+    preds_tensor = torch.from_numpy(resized_maps).float()
+    target_tensor = torch.from_numpy(masks_np.astype(np.float32))
+
+    metric = _AUPRO(fpr_limit=fpr_limit)
+    try:
+        aupro_val = metric(preds_tensor, target_tensor)
+        return float(aupro_val.item())
+    except Exception:
+        warnings.warn("AUPRO computation failed, returning 0.0", stacklevel=2)
+        return 0.0
 
 
 def compute_image_metrics(

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from benchmark.evaluation import (
     compute_image_metrics,
     compute_pixel_metrics,
+    compute_aupro,
     resize_anomaly_map,
     ImageMetrics,
     PixelMetrics,
@@ -482,6 +483,201 @@ class TestGPULatencyMeasurement:
         assert "peak_gpu_memory_mb" in result
         assert result["latency_ms"] > 0
         assert result["peak_gpu_memory_mb"] >= 0
+
+
+class TestAUPRO:
+    """Test AUPRO computation via Anomalib."""
+
+    def test_aupro_basic(self):
+        """AUPRO produces a valid float from random maps and masks."""
+        maps = torch.rand(3, 32, 32)
+        masks = torch.zeros(3, 32, 32, dtype=torch.bool)
+        masks[0, 10:20, 10:20] = True
+        masks[1, 5:15, 5:15] = True
+        aupro = compute_aupro(maps, masks, fpr_limit=0.3)
+        assert isinstance(aupro, float)
+        assert 0.0 <= aupro <= 1.0
+
+    def test_aupro_perfect(self):
+        """AUPRO is 1.0 when prediction perfectly matches ground truth."""
+        maps = torch.zeros(2, 32, 32)
+        maps[0, 10:20, 10:20] = 1.0
+        maps[1, 5:15, 5:15] = 1.0
+        masks = torch.zeros(2, 32, 32, dtype=torch.bool)
+        masks[0, 10:20, 10:20] = True
+        masks[1, 5:15, 5:15] = True
+        aupro = compute_aupro(maps, masks, fpr_limit=0.3)
+        assert aupro == pytest.approx(1.0, abs=1e-4)
+
+    def test_aupro_worst(self):
+        """AUPRO is 0.0 when prediction is all zeros but all GT is anomalous."""
+        maps = torch.zeros(2, 32, 32)
+        masks = torch.ones(2, 32, 32, dtype=torch.bool)
+        aupro = compute_aupro(maps, masks, fpr_limit=0.3)
+        assert aupro == pytest.approx(0.0, abs=1e-4)
+
+    def test_aupro_with_resize(self):
+        """AUPRO handles anomaly maps smaller than GT masks via resize."""
+        maps_small = torch.rand(3, 16, 16)
+        masks = torch.zeros(3, 32, 32, dtype=torch.bool)
+        masks[0, 10:20, 10:20] = True
+        aupro = compute_aupro(maps_small, masks, fpr_limit=0.3)
+        assert isinstance(aupro, float)
+        assert 0.0 <= aupro <= 1.0
+
+    def test_aupro_pixel_metrics_field(self):
+        """PixelMetrics includes aupro in to_dict."""
+        pm = PixelMetrics(auroc=0.9, auprc=0.8, f1=0.7, threshold=0.5, aupro=0.65)
+        d = pm.to_dict()
+        assert "pixel_aupro" in d
+        assert d["pixel_aupro"] == 0.65
+
+    def test_aupro_pixel_metrics_default(self):
+        """PixelMetrics default aupro is 0.0."""
+        pm = PixelMetrics(auroc=0.9, auprc=0.8, f1=0.7, threshold=0.5)
+        d = pm.to_dict()
+        assert d["pixel_aupro"] == 0.0
+
+
+class TestResumeSupport:
+    """Tests for resume/skip logic in run_all_categories."""
+
+    def test_skip_existing_results(self, tmp_path):
+        """run_all_categories should skip categories with existing result files."""
+        import json
+        from benchmark.runner import run_all_categories, BenchmarkResult
+        from benchmark.config import BenchmarkConfig, DatasetConfig, ModelConfig
+        from benchmark.evaluation import ImageMetrics, PixelMetrics
+
+        # Create a fake existing result
+        output_dir = tmp_path / "results"
+        output_dir.mkdir()
+        fake_result = {
+            "category": "bottle",
+            "model": "padim",
+            "image_metrics": {
+                "image_auroc": 0.99, "image_auprc": 0.99, "image_f1": 0.95,
+                "image_threshold": 40.0, "latency_ms": 10.0,
+                "image_f1_max": 0.97, "image_f1_max_threshold": 42.0,
+            },
+            "pixel_metrics": {
+                "pixel_auroc": 0.98, "pixel_auprc": 0.70, "pixel_f1": 0.50,
+                "pixel_threshold": 20.0,
+                "pixel_f1_max": 0.55, "pixel_f1_max_threshold": 22.0,
+                "pixel_aupro": 0.65,
+            },
+            "config": {},
+            "peak_gpu_memory_mb": 300.0,
+        }
+        result_path = output_dir / "padim_bottle_results.json"
+        with open(result_path, "w") as f:
+            json.dump(fake_result, f)
+
+        config = BenchmarkConfig(
+            dataset=DatasetConfig(root="datasets/MVTecAD", category="bottle"),
+            model=ModelConfig(name="padim"),
+            output_dir=output_dir,
+        )
+
+        # run_all_categories should skip bottle since result exists
+        results = run_all_categories(config, ["bottle"])
+        assert len(results) == 1
+        assert results[0].category == "bottle"
+        assert results[0].image_metrics.auroc == 0.99
+
+    def test_aggregate_mean_row(self, tmp_path):
+        """run_all_categories should append MEAN row to summary.csv."""
+        import csv
+        import json
+        from benchmark.runner import run_all_categories
+        from benchmark.config import BenchmarkConfig, DatasetConfig, ModelConfig
+
+        output_dir = tmp_path / "results"
+        output_dir.mkdir()
+
+        # Create two fake results
+        for cat in ["bottle", "cable"]:
+            fake_result = {
+                "category": cat,
+                "model": "padim",
+                "image_metrics": {
+                    "image_auroc": 0.99, "image_auprc": 0.99, "image_f1": 0.95,
+                    "image_threshold": 40.0, "latency_ms": 10.0,
+                    "image_f1_max": 0.97, "image_f1_max_threshold": 42.0,
+                },
+                "pixel_metrics": {
+                    "pixel_auroc": 0.98, "pixel_auprc": 0.70, "pixel_f1": 0.50,
+                    "pixel_threshold": 20.0,
+                    "pixel_f1_max": 0.55, "pixel_f1_max_threshold": 22.0,
+                    "pixel_aupro": 0.65,
+                },
+                "config": {},
+                "peak_gpu_memory_mb": 300.0,
+            }
+            with open(output_dir / f"padim_{cat}_results.json", "w") as f:
+                json.dump(fake_result, f)
+
+        config = BenchmarkConfig(
+            dataset=DatasetConfig(root="datasets/MVTecAD", category="bottle"),
+            model=ModelConfig(name="padim"),
+            output_dir=output_dir,
+        )
+
+        results = run_all_categories(config, ["bottle", "cable"])
+        assert len(results) == 2
+
+        # Check that summary.csv has MEAN row
+        csv_path = output_dir / "summary.csv"
+        assert csv_path.exists()
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        mean_rows = [r for r in rows if r["category"] == "MEAN"]
+        assert len(mean_rows) == 1
+        assert float(mean_rows[0]["image_auroc"]) == pytest.approx(0.99)
+
+    def test_resume_does_not_recompute(self, tmp_path):
+        """Resume should not overwrite existing result files."""
+        import json
+        from benchmark.runner import run_all_categories
+        from benchmark.config import BenchmarkConfig, DatasetConfig, ModelConfig
+
+        output_dir = tmp_path / "results"
+        output_dir.mkdir()
+
+        # Create existing result with specific values
+        fake_result = {
+            "category": "bottle",
+            "model": "padim",
+            "image_metrics": {
+                "image_auroc": 0.9999, "image_auprc": 0.9999, "image_f1": 0.9999,
+                "image_threshold": 99.0, "latency_ms": 99.0,
+                "image_f1_max": 0.9999, "image_f1_max_threshold": 99.0,
+            },
+            "pixel_metrics": {
+                "pixel_auroc": 0.9999, "pixel_auprc": 0.9999, "pixel_f1": 0.9999,
+                "pixel_threshold": 99.0,
+                "pixel_f1_max": 0.9999, "pixel_f1_max_threshold": 99.0,
+                "pixel_aupro": 0.9999,
+            },
+            "config": {},
+            "peak_gpu_memory_mb": 99.0,
+        }
+        with open(output_dir / "padim_bottle_results.json", "w") as f:
+            json.dump(fake_result, f)
+
+        config = BenchmarkConfig(
+            dataset=DatasetConfig(root="datasets/MVTecAD", category="bottle"),
+            model=ModelConfig(name="padim"),
+            output_dir=output_dir,
+        )
+
+        results = run_all_categories(config, ["bottle"])
+
+        # Verify the original values are preserved (not recomputed)
+        assert results[0].image_metrics.auroc == 0.9999
+        assert results[0].image_metrics.threshold == 99.0
 
 
 if __name__ == "__main__":

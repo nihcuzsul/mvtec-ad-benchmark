@@ -17,6 +17,13 @@ from benchmark.config import (
 from benchmark.runner import run_all_categories
 
 
+MVTEC_AD_CATEGORIES = [
+    "bottle", "cable", "capsule", "carpet", "grid", "hazelnut",
+    "leather", "metal_nut", "pill", "screw", "tile", "toothbrush",
+    "transistor", "wood", "zipper",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="MVTec AD Anomaly Detection Benchmark",
@@ -26,7 +33,7 @@ def parse_args() -> argparse.Namespace:
         "--categories",
         nargs="+",
         default=["bottle"],
-        help="MVTec AD categories to benchmark",
+        help="MVTec AD categories to benchmark (use 'all' for all 15 categories)",
     )
     parser.add_argument(
         "--models",
@@ -119,6 +126,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    # Resolve 'all' categories
+    if args.categories == ["all"]:
+        args.categories = MVTEC_AD_CATEGORIES
+
     # Build configuration
     # Set model-specific defaults
     if args.models[0] == "patchcore":
@@ -172,16 +183,19 @@ def main() -> int:
         all_results.extend(results)
 
     # Print summary
-    print("\n" + "="*80)
+    print("\n" + "="*125)
     print("BENCHMARK SUMMARY")
-    print("="*80)
-    print(f"{'Category':<12} {'Model':<8} {'ImgAUROC':>9} {'ImgAUPRC':>9} {'ImgF1':>7} {'PixAUROC':>9} {'PixAUPRC':>9} {'PixF1':>7} {'Lat(ms)':>8}")
-    print("-"*80)
+    print("="*125)
+    print(f"{'Category':<12} {'Model':<8} {'ImgAUROC':>9} {'ImgAUPRC':>9} {'ImgF1':>7} {'ImgF1max':>8} "
+          f"{'PixAUROC':>9} {'PixAUPRC':>9} {'PixAUPRO':>9} {'PixF1':>7} {'PixF1max':>8} {'Lat(ms)':>8}")
+    print("-"*125)
     for r in all_results:
         print(f"{r.category:<12} {r.model:<8} {r.image_metrics.auroc:>9.4f} {r.image_metrics.auprc:>9.4f} "
-              f"{r.image_metrics.f1:>7.4f} {r.pixel_metrics.auroc:>9.4f} {r.pixel_metrics.auprc:>9.4f} "
-              f"{r.pixel_metrics.f1:>7.4f} {r.image_metrics.latency_ms:>8.2f}")
-    print("="*80)
+              f"{r.image_metrics.f1:>7.4f} {r.image_metrics.f1_max:>8.4f} "
+              f"{r.pixel_metrics.auroc:>9.4f} {r.pixel_metrics.auprc:>9.4f} "
+              f"{r.pixel_metrics.aupro:>9.4f} {r.pixel_metrics.f1:>7.4f} {r.pixel_metrics.f1_max:>8.4f} "
+              f"{r.image_metrics.latency_ms:>8.2f}")
+    print("="*125)
 
     return 0
 

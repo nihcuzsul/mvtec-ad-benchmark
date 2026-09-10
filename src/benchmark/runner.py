@@ -1,7 +1,7 @@
 """Benchmark runner orchestrating the full pipeline."""
 
 import random
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import csv
@@ -13,8 +13,8 @@ import torch
 from .config import BenchmarkConfig, resolve_device
 from .dataset import MVTecADWrapper
 from .models import create_model_adapter
-from .threshold import calibrate_threshold, calibrate_pixel_threshold
-from .evaluation import compute_image_metrics, compute_pixel_metrics, ImageMetrics, PixelMetrics
+from .threshold import calibrate_threshold, calibrate_pixel_threshold, find_best_f1_threshold, find_best_f1_pixel
+from .evaluation import compute_image_metrics, compute_pixel_metrics, compute_aupro, ImageMetrics, PixelMetrics
 
 
 def seed_everything(seed: int) -> None:
@@ -134,18 +134,36 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     # 7. Compute image-level metrics
     image_metrics = compute_image_metrics(test_scores, test_labels, image_threshold, latency_ms)
+
+    # 7b. Compute image-level F1-max (best achievable F1 on test predictions)
+    img_f1_max_thresh, img_f1_max = find_best_f1_threshold(test_scores, test_labels, n_thresholds=500)
+    image_metrics.f1_max = img_f1_max
+    image_metrics.f1_max_threshold = img_f1_max_thresh
+
     print(f"\nImage-Level Results:")
     print(f"  AUROC:  {image_metrics.auroc:.4f}")
     print(f"  AUPRC:  {image_metrics.auprc:.4f}")
     print(f"  F1:     {image_metrics.f1:.4f} (threshold={image_metrics.threshold:.6f})")
+    print(f"  F1-max: {image_metrics.f1_max:.4f} (threshold={image_metrics.f1_max_threshold:.6f})")
     print(f"  Latency: {image_metrics.latency_ms:.2f} ms/image")
 
     # 8. Compute pixel-level metrics
     pixel_metrics = compute_pixel_metrics(test_maps, test_masks, pixel_threshold)
+
+    # 8b. Compute pixel-level F1-max (exact, over all unique score boundaries)
+    px_f1_max_thresh, px_f1_max = find_best_f1_pixel(test_maps, test_masks)
+    pixel_metrics.f1_max = px_f1_max
+    pixel_metrics.f1_max_threshold = px_f1_max_thresh
+
+    # 8c. Compute AUPRO (Anomalib protocol, FPR limit = 0.3)
+    pixel_metrics.aupro = compute_aupro(test_maps, test_masks, fpr_limit=0.3)
+
     print(f"\nPixel-Level Results:")
     print(f"  AUROC:  {pixel_metrics.auroc:.4f}")
     print(f"  AUPRC:  {pixel_metrics.auprc:.4f}")
+    print(f"  AUPRO:  {pixel_metrics.aupro:.4f} (FPR limit=0.3)")
     print(f"  F1:     {pixel_metrics.f1:.4f} (threshold={pixel_metrics.threshold:.6f})")
+    print(f"  F1-max: {pixel_metrics.f1_max:.4f} (threshold={pixel_metrics.f1_max_threshold:.6f})")
 
     result = BenchmarkResult(
         category=config.dataset.category,
@@ -177,11 +195,16 @@ def save_results(result: BenchmarkResult, output_dir: Path) -> None:
         "image_auroc": result.image_metrics.auroc,
         "image_auprc": result.image_metrics.auprc,
         "image_f1": result.image_metrics.f1,
+        "image_f1_max": result.image_metrics.f1_max,
         "image_threshold": result.image_metrics.threshold,
+        "image_f1_max_threshold": result.image_metrics.f1_max_threshold,
         "pixel_auroc": result.pixel_metrics.auroc,
         "pixel_auprc": result.pixel_metrics.auprc,
+        "pixel_aupro": result.pixel_metrics.aupro,
         "pixel_f1": result.pixel_metrics.f1,
+        "pixel_f1_max": result.pixel_metrics.f1_max,
         "pixel_threshold": result.pixel_metrics.threshold,
+        "pixel_f1_max_threshold": result.pixel_metrics.f1_max_threshold,
         "latency_ms": result.image_metrics.latency_ms,
         "peak_gpu_memory_mb": result.peak_gpu_memory_mb,
     }
@@ -196,11 +219,129 @@ def save_results(result: BenchmarkResult, output_dir: Path) -> None:
 
 
 def run_all_categories(config: BenchmarkConfig, categories: list[str]) -> list[BenchmarkResult]:
-    """Run benchmark for multiple categories."""
+    """Run benchmark for multiple categories with resume support.
+
+    Skips categories that already have a completed result file in output_dir.
+    After all categories, appends an unweighted mean row to summary.csv.
+    """
     results = []
+    skipped = []
+
     for category in categories:
         config.dataset.category = category
+
+        # Check for existing result file (resume support)
+        json_path = config.output_dir / f"{config.model.name}_{category}_results.json"
+        if json_path.exists():
+            print(f"\nSkipping {category} (already completed: {json_path.name})")
+            skipped.append(category)
+            # Load existing result for aggregate
+            with open(json_path) as f:
+                data = json.load(f)
+            existing_result = BenchmarkResult(
+                category=data["category"],
+                model=data["model"],
+                image_metrics=ImageMetrics(
+                    auroc=data["image_metrics"]["image_auroc"],
+                    auprc=data["image_metrics"]["image_auprc"],
+                    f1=data["image_metrics"]["image_f1"],
+                    threshold=data["image_metrics"]["image_threshold"],
+                    latency_ms=data["image_metrics"]["latency_ms"],
+                    f1_max=data["image_metrics"].get("image_f1_max", 0.0),
+                    f1_max_threshold=data["image_metrics"].get("image_f1_max_threshold", 0.0),
+                ),
+                pixel_metrics=PixelMetrics(
+                    auroc=data["pixel_metrics"]["pixel_auroc"],
+                    auprc=data["pixel_metrics"]["pixel_auprc"],
+                    f1=data["pixel_metrics"]["pixel_f1"],
+                    threshold=data["pixel_metrics"]["pixel_threshold"],
+                    f1_max=data["pixel_metrics"].get("pixel_f1_max", 0.0),
+                    f1_max_threshold=data["pixel_metrics"].get("pixel_f1_max_threshold", 0.0),
+                    aupro=data["pixel_metrics"].get("pixel_aupro", 0.0),
+                ),
+                config=data.get("config", {}),
+                peak_gpu_memory_mb=data.get("peak_gpu_memory_mb", 0.0),
+            )
+            results.append(existing_result)
+            continue
+
         result = run_benchmark(config)
         save_results(result, config.output_dir)
         results.append(result)
+
+    if skipped:
+        print(f"\nSkipped {len(skipped)} already-completed categories: {', '.join(skipped)}")
+
+    # Append aggregate mean row
+    if results:
+        _append_aggregate_mean(results, config)
+
     return results
+
+
+def _append_aggregate_mean(results: list[BenchmarkResult], config: BenchmarkConfig) -> None:
+    """Append unweighted mean row to summary.csv."""
+    csv_path = config.output_dir / "summary.csv"
+    n = len(results)
+    if n == 0:
+        return
+
+    mean_row = {
+        "category": "MEAN",
+        "model": results[0].model,
+        "image_auroc": np.nanmean([r.image_metrics.auroc for r in results]),
+        "image_auprc": np.nanmean([r.image_metrics.auprc for r in results]),
+        "image_f1": np.nanmean([r.image_metrics.f1 for r in results]),
+        "image_f1_max": np.nanmean([r.image_metrics.f1_max for r in results]),
+        "image_threshold": np.nanmean([r.image_metrics.threshold for r in results]),
+        "image_f1_max_threshold": np.nanmean([r.image_metrics.f1_max_threshold for r in results]),
+        "pixel_auroc": np.nanmean([r.pixel_metrics.auroc for r in results]),
+        "pixel_auprc": np.nanmean([r.pixel_metrics.auprc for r in results]),
+        "pixel_aupro": np.nanmean([r.pixel_metrics.aupro for r in results]),
+        "pixel_f1": np.nanmean([r.pixel_metrics.f1 for r in results]),
+        "pixel_f1_max": np.nanmean([r.pixel_metrics.f1_max for r in results]),
+        "pixel_threshold": np.nanmean([r.pixel_metrics.threshold for r in results]),
+        "pixel_f1_max_threshold": np.nanmean([r.pixel_metrics.f1_max_threshold for r in results]),
+        "latency_ms": np.nanmean([r.image_metrics.latency_ms for r in results]),
+        "peak_gpu_memory_mb": np.nanmean([r.peak_gpu_memory_mb for r in results]),
+    }
+
+    if csv_path.exists():
+        # Read existing CSV, remove old MEAN row if present, append new one
+        with open(csv_path, "r") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = [row for row in reader if row.get("category") != "MEAN"]
+    else:
+        # Create new CSV from results
+        fieldnames = list(mean_row.keys())
+        rows = []
+        for r in results:
+            rows.append({
+                "category": r.category,
+                "model": r.model,
+                "image_auroc": r.image_metrics.auroc,
+                "image_auprc": r.image_metrics.auprc,
+                "image_f1": r.image_metrics.f1,
+                "image_f1_max": r.image_metrics.f1_max,
+                "image_threshold": r.image_metrics.threshold,
+                "image_f1_max_threshold": r.image_metrics.f1_max_threshold,
+                "pixel_auroc": r.pixel_metrics.auroc,
+                "pixel_auprc": r.pixel_metrics.auprc,
+                "pixel_aupro": r.pixel_metrics.aupro,
+                "pixel_f1": r.pixel_metrics.f1,
+                "pixel_f1_max": r.pixel_metrics.f1_max,
+                "pixel_threshold": r.pixel_metrics.threshold,
+                "pixel_f1_max_threshold": r.pixel_metrics.f1_max_threshold,
+                "latency_ms": r.image_metrics.latency_ms,
+                "peak_gpu_memory_mb": r.peak_gpu_memory_mb,
+            })
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        writer.writerow(mean_row)
+
+    print(f"Appended MEAN row to {csv_path} ({n} categories averaged)")

@@ -13,6 +13,7 @@ from benchmark.threshold import (
     apply_threshold,
     compute_f1_at_threshold,
     find_best_f1_threshold,
+    find_best_f1_pixel,
     ThresholdConfig,
 )
 from benchmark.evaluation import compute_image_metrics, ImageMetrics
@@ -126,6 +127,78 @@ class TestFindBestF1Threshold:
         thresh, f1 = find_best_f1_threshold(scores, labels)
         assert 0.3 < thresh < 0.7  # Should be between the two clusters
         assert f1 > 0.9  # Should achieve high F1
+
+    def test_perfect_separation(self):
+        """Test with perfectly separable scores."""
+        scores = torch.tensor([0.1, 0.2, 0.3, 0.7, 0.8, 0.9])
+        labels = torch.tensor([0, 0, 0, 1, 1, 1])
+        thresh, f1 = find_best_f1_threshold(scores, labels)
+        assert f1 == 1.0
+        assert 0.3 < thresh < 0.7
+
+    def test_single_class(self):
+        """Test with only one class."""
+        scores = torch.tensor([0.1, 0.2, 0.3])
+        labels = torch.tensor([0, 0, 0])
+        thresh, f1 = find_best_f1_threshold(scores, labels)
+        assert f1 == 0.0  # No positives, F1 is 0
+
+
+class TestFindBestF1Pixel:
+    """Tests for finding best pixel-level F1 threshold."""
+
+    def test_perfect_separation(self):
+        """Test with perfectly separable anomaly maps."""
+        anomaly_maps = torch.tensor([
+            [[0.1, 0.1], [0.1, 0.1]],  # Normal, low scores
+            [[0.9, 0.9], [0.9, 0.9]],  # Anomalous, high scores
+        ])
+        gt_masks = torch.tensor([
+            [[False, False], [False, False]],
+            [[True, True], [True, True]],
+        ])
+        thresh, f1 = find_best_f1_pixel(anomaly_maps, gt_masks)
+        assert f1 == 1.0
+
+    def test_resize_handling(self):
+        """Test with different anomaly map/mask sizes."""
+        anomaly_maps = torch.zeros(1, 4, 4)
+        anomaly_maps[0, 1:3, 1:3] = 1.0
+        gt_masks = torch.zeros(1, 8, 8).bool()
+        gt_masks[0, 2:6, 2:6] = True
+        thresh, f1 = find_best_f1_pixel(anomaly_maps, gt_masks)
+        assert 0.0 <= f1 <= 1.0
+        assert isinstance(thresh, float)
+
+    def test_all_normal(self):
+        """Test with all normal images."""
+        anomaly_maps = torch.tensor([[[0.1, 0.2], [0.3, 0.4]]])
+        gt_masks = torch.tensor([[[False, False], [False, False]]]).bool()
+        thresh, f1 = find_best_f1_pixel(anomaly_maps, gt_masks)
+        assert f1 == 0.0
+
+    def test_constant_map_mixed_labels(self):
+        """Constant map with mixed labels: F1 is non-zero (valid threshold returned)."""
+        anomaly_maps = torch.full((2, 4, 4), 5.0)
+        gt_masks = torch.tensor([
+            [[False, False], [False, False]],
+            [[True, True], [True, True]],
+        ]).bool()
+        thresh, f1 = find_best_f1_pixel(anomaly_maps, gt_masks)
+        # All scores equal → only two effective outcomes: predict-all or predict-none.
+        # Predict-all gives F1 = 2*tp/(2*tp+fp) where tp=4, fp=4 → F1=0.5.
+        # Due to ties in sorting, argmax may land at different positions.
+        # Verify it's a valid result, not the degenerate F1=0.
+        assert isinstance(thresh, float)
+        assert f1 > 0.0, "Constant map with mixed labels should achieve non-zero F1"
+        assert f1 <= 1.0
+
+    def test_constant_map_same_labels(self):
+        """Constant map with all-same labels: F1 is 0 (no positives or no negatives)."""
+        anomaly_maps = torch.full((2, 4, 4), 5.0)
+        gt_masks = torch.zeros(2, 4, 4, dtype=torch.bool)
+        thresh, f1 = find_best_f1_pixel(anomaly_maps, gt_masks)
+        assert f1 == 0.0
 
 
 if __name__ == "__main__":
