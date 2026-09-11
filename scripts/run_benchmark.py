@@ -16,6 +16,10 @@ from benchmark.config import (
 )
 from benchmark.runner import run_all_categories
 
+# Import dataset preparation from sibling script
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from prepare_dataset import ensure_dataset
+
 
 MVTEC_AD_CATEGORIES = [
     "bottle", "cable", "capsule", "carpet", "grid", "hazelnut",
@@ -120,11 +124,20 @@ def parse_args() -> argparse.Namespace:
         default=9,
         help="Number of neighbors for PatchCore",
     )
+    parser.add_argument(
+        "--hf-dir",
+        type=Path,
+        default=Path("./datasets/Voxel51-mvtec-ad"),
+        help="Path to Voxel51/mvtec-ad HF dataset (used for auto-preparation)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+
+    # Ensure prepared dataset exists before benchmarking
+    ensure_dataset(hf_dir=args.hf_dir, output_dir=args.data_root)
 
     # Resolve 'all' categories
     if args.categories == ["all"]:

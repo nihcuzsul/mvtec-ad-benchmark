@@ -4,12 +4,14 @@ assignment/
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 venv/
+.pytest_cache/
 
 # Data
-data/
 datasets/
+*.log
 
 # Model artifacts
 checkpoints/
@@ -18,8 +20,18 @@ checkpoints/
 
 # Generated outputs
 results/
-reports/
+demo_output/
 
 # IDE / OS
 .vscode/
 .DS_Store
+
+# OpenCode / AI tool artifacts
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+
+# Dev utilities (not part of submission)
+scripts/repair_dataset.py
+scripts/verify_dataset.py
+docs/system_overview.md

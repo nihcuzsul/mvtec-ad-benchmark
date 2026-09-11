@@ -1,0 +1,12 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+anomalib==2.6.1
+lightning>=2.6.0
+numpy
+pandas
+scikit-learn
+pyyaml
+tqdm
+pytest==9.1.1
+pytest-cov==7.1.0

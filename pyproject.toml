@@ -14,9 +14,10 @@ dependencies = [
     "pyyaml",
     "tqdm",
 ]
+license = {text = "MIT"}
+
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
-license = {text = "MIT"}
 
 [project.scripts]
 benchmark = "scripts.run_benchmark:main"
